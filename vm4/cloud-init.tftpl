@@ -1,0 +1,240 @@
+#cloud-config
+# 🚀 Cloud-init конфигурация для VM4
+
+# Основные настройки
+hostname: ${hostname}
+manage_etc_hosts: true
+
+# Пользователи
+users:
+  - name: ${username}
+    groups: [adm, sudo]
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    plain_text_passwd: ${password}
+    chpasswd: { expire: false }
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# SSH настройки
+ssh_pwauth: ${ssh_password_auth}
+disable_root: false
+ssh_import_id: []
+
+# SSH конфигурация
+ssh:
+  emit_keys_to_console: false
+
+# Сетевые настройки
+write_files:
+  - path: /etc/netplan/01-netcfg.yaml
+    content: |
+      network:
+        version: 2
+        ethernets:
+          ens18:
+            dhcp4: false
+            addresses: [${vm_ip_address}/24]
+            gateway4: ${vm_gateway}
+            nameservers:
+              addresses: [8.8.8.8, 1.1.1.1]
+    permissions: '0644'
+
+# Обновление пакетов
+package_update: true
+package_upgrade: true
+
+# Установка пакетов
+packages:
+  - curl
+  - wget
+  - git
+  - vim
+  - htop
+  - net-tools
+  - qemu-guest-agent
+  - unzip
+  - tree
+  - nano
+  - docker.io
+  - docker-compose
+  - ca-certificates
+  - lsb-release
+  - gnupg
+
+# Создание файлов конфигурации
+write_files:
+  - content: |
+      #!/bin/bash
+      echo "🚀 Настройка VM4..."
+      
+      # Включаем и запускаем службы
+      systemctl enable qemu-guest-agent
+      systemctl start qemu-guest-agent
+      systemctl enable ssh
+      systemctl start ssh
+      
+      # Настройка SSH
+      %{ if ssh_password_auth }
+      sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+      sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+      %{ else }
+      sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+      sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+      %{ endif }
+      systemctl restart ssh
+      
+      # Настройка сети
+      netplan apply
+      
+      # Настройка firewall
+      ufw allow ssh
+      ufw allow 3000/tcp  # Grafana
+      ufw allow 9090/tcp  # Prometheus
+      ufw allow 9100/tcp  # Node Exporter
+      ufw --force enable
+      
+      # Статический IP если DHCP не работает
+      if ! ip route | grep default; then
+          ip addr add ${vm_ip_address}/24 dev ens18
+          ip route add default via ${vm_gateway}
+      fi
+      
+      # Создание welcome файлов
+      echo "VM4 server ready!" > /home/${username}/welcome.txt
+      echo "SSH: ${username}@${vm_ip_address}" >> /home/${username}/welcome.txt
+      echo "Password: ${password}" >> /home/${username}/welcome.txt
+      chown ${username}:${username} /home/${username}/welcome.txt
+      chmod 644 /home/${username}/welcome.txt
+      
+      # Исправление прав SSH
+      if [ -d "/home/${username}/.ssh" ]; then
+          chmod 700 /home/${username}/.ssh
+          chmod 600 /home/${username}/.ssh/authorized_keys
+          chown -R ${username}:${username} /home/${username}/.ssh
+      fi
+      
+      # Настройка Docker
+      systemctl enable docker
+      systemctl start docker
+      usermod -aG docker ${username}
+      
+      # Создание docker-compose.yml для мониторинга
+      mkdir -p /home/${username}/monitoring
+      cat > /home/${username}/monitoring/docker-compose.yml << 'EOF'
+version: '3.8'
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_SECURITY_ADMIN_USER=admin
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+
+volumes:
+  prometheus_data:
+  grafana_data:
+EOF
+
+      # Создание конфигурации Prometheus
+      mkdir -p /home/${username}/monitoring/prometheus
+      cat > /home/${username}/monitoring/prometheus/prometheus.yml << 'EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+      
+  - job_name: 'vm4-node'
+    static_configs:
+      - targets: ['${vm_ip_address}:9100']
+EOF
+
+      # Создание базовой настройки Grafana
+      mkdir -p /home/${username}/monitoring/grafana/provisioning/datasources
+      cat > /home/${username}/monitoring/grafana/provisioning/datasources/prometheus.yml << 'EOF'
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+EOF
+
+      # Исправление прав для мониторинга
+      chown -R ${username}:${username} /home/${username}/monitoring
+      
+      echo "✅ VM4 готова с Grafana и Prometheus!"
+      echo "🔐 SSH: ${username}@${vm_ip_address}"
+      echo "🔑 Password: ${password}"
+      echo "📊 Grafana: http://${vm_ip_address}:3000 (admin/admin123)"
+      echo "📈 Prometheus: http://${vm_ip_address}:9090"
+    path: /tmp/setup-vm4.sh
+    permissions: '0755'
+
+# Команды при первой загрузке
+runcmd:
+  - /tmp/setup-vm4.sh
+  - sleep 30
+  - cd /home/devops/monitoring && docker-compose up -d
+
+# Финальное сообщение
+final_message: "🚀 VM4 server is ready! Login with: ssh ${username}@${vm_ip_address}"
+
+# Перезагрузка для применения настроек
+power_state:
+  delay: "+1"
+  mode: reboot
+  message: "Перезагрузка VM4 для применения SSH настроек"
+  condition: true
