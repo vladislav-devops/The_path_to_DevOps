@@ -1,0 +1,34 @@
+#cloud-config
+hostname: ${hostname}
+manage_etc_hosts: true
+locale: en_US.UTF-8
+
+users:
+  - name: ${username}
+    groups: [adm, sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: ${password}
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+ssh_pwauth: ${ssh_password_auth}
+disable_root: true
+
+write_files:
+  - path: /etc/netplan/01-vm7.yaml
+    content: |
+      network:
+        version: 2
+        ethernets:
+          ens18:
+            dhcp4: false
+            addresses: [${ip}/${netmask}]
+            gateway4: ${gateway}
+            nameservers:
+              addresses: ${dns}
+    permissions: '0644'
+
+runcmd:
+  - netplan apply
